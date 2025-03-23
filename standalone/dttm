@@ -1,0 +1,202 @@
+#!/usr/bin/env python3
+
+import argparse
+import math
+import sys
+import time
+from datetime import datetime
+from datetime import timedelta
+from datetime import timezone
+from enum import Enum
+from functools import cache
+from typing import Optional
+from typing import Sequence
+
+COMMON_DATE_FORMATS = {
+    "basic_ymdhms": "%Y-%m-%d %H:%M:%S",
+    "iso_8601_no_tz_micro": "%Y-%m-%dT%H:%M:%S.%f",
+    "iso_8601_with_tz_micro": "%Y-%m-%dT%H:%M:%S.%f%z",
+    "iso_8601_no_tz": "%Y-%m-%dT%H:%M:%S",
+    "iso_8601_with_tz": "%Y-%m-%dT%H:%M:%S%z",
+    "basic_ymdhms_micro": "%Y-%m-%d %H:%M:%S.%f",
+    "basic_ymdhms_tz": "%Y-%m-%d %H:%M:%S %z",
+    "rfc_2822_email_style": "%a, %d %b %Y %H:%M:%S %z",
+    "slash_mdy": "%m/%d/%Y %H:%M:%S",
+    "wordy_long_month": "%B %d, %Y %H:%M:%S",
+}
+
+
+def parse_datetime(dt_string) -> datetime:
+    """
+    Tries to parse the given datetime string using a set of common formats.
+    Returns a datetime object if parsing is successful, otherwise raises ValueError.
+    """
+    for fmt_name, fmt_str in COMMON_DATE_FORMATS.items():
+        try:
+            return datetime.strptime(dt_string, fmt_str)
+        except ValueError:
+            pass
+
+    raise ValueError(f"Could not parse date string: {dt_string}")
+
+
+class UnixTimeUnit(Enum):
+    """
+    Represents the different units in which a the offset from the Unix epoch may be expressed.
+    """
+    SECONDS = 1
+    MILLISECONDS = 2
+    MICROSECONDS = 3
+    NANOSECONDS = 4
+
+
+def parse_unix_time(int_date_time: str) -> Optional[tuple[datetime, UnixTimeUnit]]:
+    try:
+        inp_time = int(int_date_time)
+    except ValueError:
+        return None
+
+    now_ms = curr_unix_time_ms()
+
+    candidates = [
+        (abs(inp_time - now_ms), inp_time, UnixTimeUnit.MILLISECONDS),
+        (abs(inp_time * 1000 - now_ms), inp_time * 1000, UnixTimeUnit.SECONDS),
+        (abs(inp_time // 1000 - now_ms), inp_time // 1000, UnixTimeUnit.MICROSECONDS),
+        (abs(inp_time // 1_000_000 - now_ms),
+         inp_time // 1_000_000, UnixTimeUnit.NANOSECONDS)
+    ]
+
+    _, closest_ms, best_unit = min(candidates, key=lambda x: x[0])
+    parsed_datetime = epoch(True) + timedelta(milliseconds=closest_ms)
+    return parsed_datetime, best_unit
+
+
+@cache
+def epoch(aware: bool) -> datetime:
+    """
+    Return the epoch (1970-01-01) as a datetime object.
+
+    :param aware: If True, return epoch with tzinfo=UTC, else naive.
+    :return: A datetime object representing the epoch.
+    """
+    if aware:
+        return datetime(1970, 1, 1, tzinfo=timezone.utc)
+    else:
+        return datetime(1970, 1, 1)
+
+
+def is_aware(dt: datetime) -> bool:
+    """
+    Return True if dt is an aware datetime, False otherwise.
+
+    :param dt: A datetime object.
+    :return: True if the datetime object is aware, else False.
+    """
+    return dt.tzinfo is not None and dt.tzinfo.utcoffset(dt) is not None
+
+
+def curr_unix_time_ms() -> int:
+    """
+    Return the current millisecond unix time.
+
+    :return: An integer representing current time in milliseconds since epoch (UTC).
+    """
+    return time.time_ns() // 1_000_000
+
+
+def offset_from_epoch(dt: datetime) -> int:
+    """
+    Compute the number of milliseconds since Jan 1, 1970.
+
+    :param dt: A datetime object (aware or naive).
+    :return: Milliseconds since the unix (UTC) epoch if dt is aware (in any timezone), otherwise
+    since Jan 1, 1970.
+    """
+    return math.floor((dt - epoch(is_aware(dt))) / timedelta(milliseconds=1))
+
+
+def to_datetime(unix_time_ms: int, aware: bool = True) -> datetime:
+    """
+    Convert a given UNIX timestamp in milliseconds to a datetime.
+
+    :param unix_time_ms: Timestamp in milliseconds since epoch.
+    :param aware: If True, return an aware datetime in UTC, else naive.
+    :return: The corresponding datetime object.
+    """
+    return epoch(aware) + timedelta(milliseconds=unix_time_ms)
+
+
+def to_iso_format(dt: datetime) -> str:
+    """
+    Return the ISO-8601 string representation of a datetime with millisecond precision.
+
+    :param dt: The datetime object to be converted.
+    :return: An ISO-8601 formatted string representation of the datetime.
+    """
+    return dt.isoformat(timespec="milliseconds")
+
+
+def get_parser() -> argparse.ArgumentParser:
+    """
+    Construct and return the argument parser for the CLI.
+
+    :return: An argparse.ArgumentParser instance.
+    """
+    parser = argparse.ArgumentParser(prog="dttm", description="The Date and Time utility (v0.1)")
+    subparsers = parser.add_subparsers(dest="command")
+
+    now_cmd = subparsers.add_parser(
+        "now", help="Print the current time as a unix time in milliseconds"
+    )
+    now_cmd.add_argument(
+        "timestamp",
+        type=int,
+        nargs="?",
+        default=curr_unix_time_ms(),
+        help="(Optional) An integer representing the current unix time in ms. If omitted, "
+             "the system's current time is used."
+    )
+    parse_cmd = subparsers.add_parser(
+        "parse", help="Parse a timestamp in ms and print its offset_from_epoch"
+    )
+    parse_cmd.add_argument(
+        "timestamp",
+        type=str,
+        help="The timestamp in any common format"
+    )
+
+    return parser
+
+
+def main(args: Sequence[str]):
+    """
+    Main entry point for the CLI. Processes arguments and dispatches commands.
+
+    :param args: Sequence of command-line arguments (excluding the program name).
+    """
+    parser = get_parser()
+    parsed_args = parser.parse_args(args)
+
+    if not parsed_args.command:
+        parser.print_help()
+        sys.exit(1)
+    elif parsed_args.command == "now":
+        unix_time_ms = parsed_args.timestamp
+        print(f"Unix time in milliseconds: {unix_time_ms}")
+        curr_dt = to_datetime(unix_time_ms)
+        print(f"Current time (UTC): {to_iso_format(curr_dt)}")
+        print(f"Current time (local): {to_iso_format(curr_dt.astimezone())}")
+    elif parsed_args.command == "parse":
+        ret = parse_unix_time(parsed_args.timestamp)
+        if ret is not None:
+            dt, unit = ret
+            print(f"Detected unix time unit: {unit}", file=sys.stderr)
+            print(to_iso_format(dt))
+        else:
+            dt = parse_datetime(parsed_args.timestamp)
+            print(offset_from_epoch(dt))
+
+
+if __name__ == '__main__':
+    main(tuple(sys.argv[1:]))
+
